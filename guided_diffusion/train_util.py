@@ -165,11 +165,7 @@ class TrainLoop:
 
     def run_loop(self):
         while not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps:
-            if self.step % len(self.data) == 0:  # Reset DataLoader each epoch
-                print("Resetting DataLoader for new epoch...")
-                self.data_iter = iter(self.data)
-
-            batch_pos, batch_neg, cond_pos, cond_neg = next(self.data_iter)
+            batch_pos, batch_neg, cond_pos, cond_neg = next(self.data)
 
             self.run_step(batch_pos, batch_neg, cond_pos, cond_neg)
 

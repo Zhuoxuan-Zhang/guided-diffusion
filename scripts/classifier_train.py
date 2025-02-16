@@ -29,7 +29,7 @@ def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure()
+    logger.configure(dir='model_checkpoints')
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_classifier_and_diffusion(
@@ -90,14 +90,14 @@ def main():
 
     logger.log(f"creating optimizer...")
     opt = AdamW(mp_trainer.master_params, lr=args.lr, weight_decay=args.weight_decay)
-    if args.resume_checkpoint:
-        opt_checkpoint = bf.join(
-            bf.dirname(args.resume_checkpoint), f"opt{resume_step:06}.pt"
-        )
-        logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
-        opt.load_state_dict(
-            dist_util.load_state_dict(opt_checkpoint, map_location=dist_util.dev())
-        )
+    # if args.resume_checkpoint:
+    #     opt_checkpoint = bf.join(
+    #         bf.dirname(args.resume_checkpoint), f"opt{resume_step:06}.pt"
+    #     )
+    #     logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
+    #     opt.load_state_dict(
+    #         dist_util.load_state_dict(opt_checkpoint, map_location=dist_util.dev())
+    #     )
 
     logger.log("training classifier model...")
 

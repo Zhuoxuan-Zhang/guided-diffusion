@@ -1,12 +1,60 @@
 import math
 import random
 
+import os
+import json
+import random
+import torch as th
+from torch.utils.data import Dataset, DataLoader
+import torchvision.transforms as transforms
 from PIL import Image
 import blobfile as bf
 from mpi4py import MPI
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
 
+class PreferenceDataset(Dataset):
+    def __init__(self, data_dir, image_size):
+        """
+        Loads symmetric (preferred) and asymmetric (rejected) images from JSON pair file.
+        """
+        self.data_dir = data_dir
+        self.image_size = image_size
+
+        # Load pairs.json which links preferred and rejected images
+        pairs_path = os.path.join(data_dir, "dataset.json")
+        with open(pairs_path, "r") as f:
+            self.pairs = json.load(f)
+
+        # Define image transformation
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor()
+        ])
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        try:
+            pair = self.pairs[idx]
+            preferred_path = os.path.join(self.data_dir, pair["preferred"])
+            rejected_path = os.path.join(self.data_dir, pair["rejected"])
+
+            preferred_img = self.transform(Image.open(preferred_path).convert("RGB"))
+            rejected_img = self.transform(Image.open(rejected_path).convert("RGB"))
+            return preferred_img, rejected_img, {}, {}  # Empty dicts for conditionals
+        except Exception as e:
+            print(f"Error loading pair {idx}: {e}")
+            return self.__getitem__((idx + 1) % len(self))  # Skip to next image
+
+def load_preference_data(data_dir, batch_size, image_size, num_workers=4):
+    """
+    Returns a DataLoader for loading symmetric (preferred) and asymmetric (rejected) images.
+    """
+    dataset = PreferenceDataset(data_dir, image_size)
+    print(f"Loaded dataset with {len(dataset)} pairs")
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
 def load_data(
     *,

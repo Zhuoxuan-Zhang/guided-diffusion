@@ -1,11 +1,9 @@
-"""
-Train a diffusion model on images.
-"""
-
 import argparse
+import torch as th
+import torch.nn.functional as F
 
 from guided_diffusion import dist_util, logger
-from guided_diffusion.image_datasets import load_data
+from guided_diffusion.image_datasets import load_preference_data
 from guided_diffusion.resample import create_named_schedule_sampler
 from guided_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -15,12 +13,11 @@ from guided_diffusion.script_util import (
 )
 from guided_diffusion.train_util import TrainLoop
 
-
 def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure()
+    logger.configure(dir='model_checkpoints')
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -30,14 +27,13 @@ def main():
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log("creating data loader...")
-    data = load_data(
+    data = load_preference_data(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         image_size=args.image_size,
-        class_cond=args.class_cond,
     )
 
-    logger.log("training...")
+    logger.log("training with DPO...")
     TrainLoop(
         model=model,
         diffusion=diffusion,
@@ -56,7 +52,6 @@ def main():
         lr_anneal_steps=args.lr_anneal_steps,
     ).run_loop()
 
-
 def create_argparser():
     defaults = dict(
         data_dir="",
@@ -71,13 +66,12 @@ def create_argparser():
         save_interval=10000,
         resume_checkpoint="",
         use_fp16=False,
-        fp16_scale_growth=1e-3,
+        fp16_scale_growth=1e-4,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
     return parser
-
 
 if __name__ == "__main__":
     main()

@@ -27,31 +27,38 @@ def main():
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log("creating data loader...")
-    data = load_data(
-        data_dir=args.data_dir,
+    preferred_data = load_data(
+        data_dir='/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/rotational_contrast_pairs/preferred/',
         batch_size=args.batch_size,
         image_size=args.image_size,
         class_cond=args.class_cond,
-        dpo_dataset=True
     )
-    # logger.log("training with DPO...")
-    # TrainLoop(
-    #     model=model,
-    #     diffusion=diffusion,
-    #     data=data,
-    #     batch_size=args.batch_size,
-    #     microbatch=args.microbatch,
-    #     lr=args.lr,
-    #     ema_rate=args.ema_rate,
-    #     log_interval=args.log_interval,
-    #     save_interval=args.save_interval,
-    #     resume_checkpoint=args.resume_checkpoint,
-    #     use_fp16=args.use_fp16,
-    #     fp16_scale_growth=args.fp16_scale_growth,
-    #     schedule_sampler=schedule_sampler,
-    #     weight_decay=args.weight_decay,
-    #     lr_anneal_steps=args.lr_anneal_steps,
-    # ).run_loop()
+    reject_data = load_data(
+        data_dir='/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/rotational_contrast_pairs/rejected/',
+        batch_size=args.batch_size,
+        image_size=args.image_size,
+        class_cond=args.class_cond,
+    )
+
+    logger.log("training with DPO...")
+    TrainLoop(
+        model=model,
+        diffusion=diffusion,
+        preferred_data=preferred_data,
+        reject_data=reject_data,
+        batch_size=args.batch_size,
+        microbatch=args.microbatch,
+        lr=args.lr,
+        ema_rate=args.ema_rate,
+        log_interval=args.log_interval,
+        save_interval=args.save_interval,
+        resume_checkpoint=args.resume_checkpoint,
+        use_fp16=args.use_fp16,
+        fp16_scale_growth=args.fp16_scale_growth,
+        schedule_sampler=schedule_sampler,
+        weight_decay=args.weight_decay,
+        lr_anneal_steps=args.lr_anneal_steps,
+    ).run_loop()
 
 def create_argparser():
     defaults = dict(

@@ -1,64 +1,12 @@
 import math
 import random
 
-import os
-import json
-import random
-import torch as th
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
 from PIL import Image
 import blobfile as bf
 from mpi4py import MPI
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
-from guided_diffusion import dist_util, logger
 
-class PreferenceDataset(Dataset):
-    def __init__(self, data_dir, image_size, classes=None, shard=0, num_shards=1):
-        """
-        Loads symmetric (preferred) and asymmetric (rejected) images from JSON pair file.
-        """
-        super().__init__()
-        self.data_dir = data_dir
-        self.image_size = image_size
-        self.local_classes = None if classes is None else classes[shard:][::num_shards]
-
-        # Load pairs.json which links preferred and rejected images
-        pairs_path = os.path.join(data_dir, "dataset.json")
-        with open(pairs_path, "r") as f:
-            self.pairs = json.load(f)
-
-        # Define image transformation
-        self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor()
-        ])
-
-    def __len__(self):
-        return len(self.pairs)
-
-    def __getitem__(self, idx):
-        pair = self.pairs[idx]
-        preferred_path = os.path.join(self.data_dir, pair["preferred"])
-        rejected_path = os.path.join(self.data_dir, pair["rejected"])
-
-        preferred_img = self.transform(Image.open(preferred_path).convert("RGB"))
-        rejected_img = self.transform(Image.open(rejected_path).convert("RGB"))
-
-        out_dict = {}
-        if self.local_classes is not None:
-            out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
-
-        return preferred_img, rejected_img, {}, {}, out_dict # Empty dicts for conditionals
-
-def load_preference_data(data_dir, batch_size, image_size, num_workers=4):
-    """
-    Returns a DataLoader for loading symmetric (preferred) and asymmetric (rejected) images.
-    """
-    dataset = PreferenceDataset(data_dir, image_size)
-    print(f"Loaded dataset with {len(dataset)} pairs")
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
 def load_data(
     *,
@@ -69,7 +17,6 @@ def load_data(
     deterministic=False,
     random_crop=False,
     random_flip=False,
-    dpo_dataset=False,
 ):
     """
     For a dataset, create a generator over (images, kwargs) pairs.
@@ -91,11 +38,7 @@ def load_data(
     """
     if not data_dir:
         raise ValueError("unspecified data directory")
-    if dpo_dataset:
-        # FIXME: hard-coded
-        all_files = _list_image_files_recursively('/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/rotational_contrast_pairs/preferred/')
-    else:
-        all_files = _list_image_files_recursively(data_dir)
+    all_files = _list_image_files_recursively(data_dir)
     classes = None
     if class_cond:
         # Assume classes are the first part of the filename,
@@ -103,23 +46,15 @@ def load_data(
         class_names = [bf.basename(path).split("_")[0] for path in all_files]
         sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
         classes = [sorted_classes[x] for x in class_names]
-    if dpo_dataset:
-        dataset = PreferenceDataset(data_dir, 
-            image_size,
-            classes=classes,
-            shard=MPI.COMM_WORLD.Get_rank(),
-            num_shards=MPI.COMM_WORLD.Get_size(),
-        )
-    else:
-        dataset = ImageDataset(
-            image_size,
-            all_files,
-            classes=classes,
-            shard=MPI.COMM_WORLD.Get_rank(),
-            num_shards=MPI.COMM_WORLD.Get_size(),
-            random_crop=random_crop,
-            random_flip=random_flip,
-        )
+    dataset = ImageDataset(
+        image_size,
+        all_files,
+        classes=classes,
+        shard=MPI.COMM_WORLD.Get_rank(),
+        num_shards=MPI.COMM_WORLD.Get_size(),
+        random_crop=random_crop,
+        random_flip=random_flip,
+    )
     if deterministic:
         loader = DataLoader(
             dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True
@@ -177,8 +112,8 @@ class ImageDataset(Dataset):
         else:
             arr = center_crop_arr(pil_image, self.resolution)
 
-        if self.random_flip and random.random() < 0.5:
-            arr = arr[:, ::-1]
+        # if self.random_flip and random.random() < 0.5:
+        #     arr = arr[:, ::-1]
 
         arr = arr.astype(np.float32) / 127.5 - 1
 

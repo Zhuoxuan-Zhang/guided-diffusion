@@ -17,20 +17,21 @@ from .resample import LossAwareSampler, UniformSampler
 # 20-21 within the first ~1K steps of training.
 INITIAL_LOG_LOSS_SCALE = 20.0
 
+
 def dpo_loss(preferred_loss, rejected_loss, beta=0.1):
     """Compute DPO loss with better numerical stability."""
-    diff = (preferred_loss - rejected_loss) / (beta + 1e-8) 
+    diff = (preferred_loss - rejected_loss) / (beta + 1e-8)
     diff = th.clamp(diff, min=-5, max=5)
 
     # log-sigmoid computation
-    loss = -th.nn.functional.logsigmoid(diff).mean()  
+    loss = -th.nn.functional.logsigmoid(diff).mean()
 
     # If NaN is detected, return zero loss
     if th.isnan(loss).any() or th.isinf(loss).any():
         print("NaN detected in DPO loss! Returning zero loss...")
-        return th.tensor(0.0, device=loss.device)
-
+        return loss.detach()  # Preserve gradient tracking
     return loss
+
 
 class TrainLoop:
     def __init__(
@@ -38,7 +39,8 @@ class TrainLoop:
         *,
         model,
         diffusion,
-        data,
+        preferred_data,
+        reject_data,
         batch_size,
         microbatch,
         lr,
@@ -54,7 +56,8 @@ class TrainLoop:
     ):
         self.model = model
         self.diffusion = diffusion
-        self.data = data
+        self.preferred_data = preferred_data
+        self.reject_data = reject_data
         self.batch_size = batch_size
         self.microbatch = microbatch if microbatch > 0 else batch_size
         self.lr = lr
@@ -71,6 +74,9 @@ class TrainLoop:
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
+        self.last_loss_pos = None
+        self.last_loss_neg = None
+        self.last_dpo_loss = None
 
         self.step = 0
         self.resume_step = 0
@@ -86,7 +92,7 @@ class TrainLoop:
         )
 
         self.opt = AdamW(
-            self.mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay
+            self.mp_trainer.master_params, lr=self.lr * 0.5, weight_decay=self.weight_decay
         )
         if self.resume_step:
             self._load_optimizer_state()
@@ -164,8 +170,12 @@ class TrainLoop:
             self.opt.load_state_dict(state_dict)
 
     def run_loop(self):
-        while not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps:
-            batch_pos, batch_neg, cond_pos, cond_neg = next(self.data)
+        while (
+            not self.lr_anneal_steps
+            or self.step + self.resume_step < self.lr_anneal_steps
+        ):
+            batch_pos, cond_pos = next(self.preferred_data)
+            batch_neg, cond_neg = next(self.reject_data)
 
             self.run_step(batch_pos, batch_neg, cond_pos, cond_neg)
 
@@ -183,24 +193,13 @@ class TrainLoop:
             self.save()
 
     def run_step(self, batch_pos, batch_neg, cond_pos, cond_neg):
-        """modified run_step to process preference pairs."""
-         # Check for NaNs in input batches
-        if th.isnan(batch_pos).any() or th.isnan(batch_neg).any():
-            print("❌ NaN detected in input batches (batch_pos or batch_neg)! Skipping step...")
-            return  # Skip this batch
-
-        for key in cond_pos:
-            if th.isnan(cond_pos[key]).any():
-                print(f"❌ NaN detected in cond_pos[{key}]! Skipping step...")
-                return
-
-        for key in cond_neg:
-            if th.isnan(cond_neg[key]).any():
-                print(f"❌ NaN detected in cond_neg[{key}]! Skipping step...")
-                return
         self.forward_backward(batch_pos, batch_neg, cond_pos, cond_neg)
+        grad_norm = th.nn.utils.clip_grad_norm_(self.mp_trainer.master_params, max_norm=1.0)
+        if grad_norm > 5.0:
+            print(f"High gradient norm detected: {grad_norm}. Reducing learning rate...")
+            for param_group in self.opt.param_groups:
+                param_group["lr"] = max(param_group["lr"] * 0.9, 1e-6)   # Reduce learning rate by 10%
         took_step = self.mp_trainer.optimize(self.opt)
-        th.nn.utils.clip_grad_norm_(self.mp_trainer.master_params, max_norm=5.0)
         if took_step:
             self._update_ema()
         self._anneal_lr()
@@ -209,49 +208,57 @@ class TrainLoop:
     def forward_backward(self, batch_pos, batch_neg, cond_pos, cond_neg):
         """Modified forward_backward to apply DPO loss."""
         self.mp_trainer.zero_grad()
-        micro_pos = batch_pos.to(dist_util.dev())
-        micro_neg = batch_neg.to(dist_util.dev())
-        micro_cond_pos = {k: v.to(dist_util.dev()) for k, v in cond_pos.items()}
-        micro_cond_neg = {k: v.to(dist_util.dev()) for k, v in cond_neg.items()}
 
-        # Double-check for NaNs after moving to GPU
-        if th.isnan(micro_pos).any() or th.isnan(micro_neg).any():
-            print("❌ NaN detected in microbatch tensors! Skipping step...")
-            return
+        for i in range(0, batch_pos.shape[0], self.microbatch):
+            micro_pos = batch_pos[i : i + self.microbatch].to(dist_util.dev())
+            micro_neg = batch_neg[i : i + self.microbatch].to(dist_util.dev())
+            micro_pos_cond = {
+                k: v[i : i + self.microbatch].to(dist_util.dev())
+                for k, v in cond_pos.items()
+            }
+            micro_neg_cond = {
+                k: v[i : i + self.microbatch].to(dist_util.dev())
+                for k, v in cond_neg.items()
+            }
+            last_batch = (i + self.microbatch) >= batch_pos.shape[0]
+            t_pos, weights_pos = self.schedule_sampler.sample(
+                micro_pos.shape[0], dist_util.dev()
+            )
+            t_neg, weights_neg = self.schedule_sampler.sample(micro_neg.shape[0], dist_util.dev())
 
-        for key in micro_cond_pos:
-            if th.isnan(micro_cond_pos[key]).any():
-                print(f"❌ NaN detected in micro_cond_pos[{key}]! Skipping step...")
+            losses_pos = self.diffusion.training_losses(
+                self.ddp_model, micro_pos, t_pos, model_kwargs=micro_pos_cond
+            )
+            losses_neg = self.diffusion.training_losses(
+                self.ddp_model, micro_neg, t_neg, model_kwargs=micro_neg_cond
+            )
+
+            # check for NaNs before computing loss
+            if th.isnan(losses_pos["loss"]).any() or th.isnan(losses_neg["loss"]).any():
+                print("NaN detected in losses, skipping step...")
+                self.mp_trainer.zero_grad()  # Reset gradients
                 return
+            beta = 0.02
+            if self.step % 500 == 0:
+                beta = max(beta * (0.99 ** self.step), 0.005)  # Gradually decrease beta
 
-        for key in micro_cond_neg:
-            if th.isnan(micro_cond_neg[key]).any():
-                print(f"❌ NaN detected in micro_cond_neg[{key}]! Skipping step...")
-                return
+            valid_samples = losses_pos["loss"] < losses_neg["loss"]
+            if not valid_samples.all():  # If any invalid samples exist
+                # print(f"Warning: {(~valid_samples).sum().item()} invalid samples found. Filtering...")
+                losses_pos["loss"] = losses_pos["loss"][valid_samples]
+                losses_neg["loss"] = losses_neg["loss"][valid_samples]
+                if losses_pos["loss"].numel() == 0:  # If no valid samples left, skip
+                    self.mp_trainer.zero_grad()
+                    return
 
-        t_pos, _ = self.schedule_sampler.sample(micro_pos.shape[0], dist_util.dev())
-        t_neg, _ = self.schedule_sampler.sample(micro_neg.shape[0], dist_util.dev())
+            loss = dpo_loss(losses_pos["loss"], losses_neg["loss"], beta=beta)
+            
+            
+            self.last_loss_pos = losses_pos["loss"].mean().detach()
+            self.last_loss_neg = losses_neg["loss"].mean().detach()
+            self.last_dpo_loss = loss.detach()
 
-        # if hasattr(self.model, "num_classes") and self.model.num_classes is not None:
-        #     if "y" not in micro_cond_pos:
-        #         micro_cond_pos["y"] = th.zeros(micro_pos.shape[0], dtype=th.long, device=dist_util.dev())
-        #     if "y" not in micro_cond_neg:
-        #         micro_cond_neg["y"] = th.zeros(micro_neg.shape[0], dtype=th.long, device=dist_util.dev())
-        losses_pos = self.diffusion.training_losses(self.ddp_model, micro_pos, t_pos, model_kwargs=micro_cond_pos)
-        losses_neg = self.diffusion.training_losses(self.ddp_model, micro_neg, t_neg, model_kwargs=micro_cond_neg)
-
-        # print("Preferred Loss:", losses_pos["loss"].mean().item())
-        # print("Rejected Loss:", losses_neg["loss"].mean().item())
-        # with th.no_grad():  # Don't track gradients for debugging
-        #     model_out_pos = self.model(micro_pos, self.diffusion._scale_timesteps(t_pos), **micro_cond_pos)
-
-        #     print(f"Model Output Pos Min: {model_out_pos.min().item()}, Max: {model_out_pos.max().item()}")
-        # check for NaNs before computing loss
-        if th.isnan(losses_pos["loss"]).any() or th.isnan(losses_neg["loss"]).any():
-            print("NaN detected in losses, skipping step...")
-            return  # Skip this batch
-        loss = dpo_loss(losses_pos["loss"], losses_neg["loss"], beta=0.2)
-        self.mp_trainer.backward(loss)
+            self.mp_trainer.backward(loss)
 
     def _update_ema(self):
         for rate, params in zip(self.ema_rate, self.ema_params):
@@ -268,6 +275,9 @@ class TrainLoop:
     def log_step(self):
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
+        logger.logkv("preferred_loss", self.last_loss_pos)
+        logger.logkv("rejected_loss", self.last_loss_neg)
+        logger.logkv("dpo_loss", self.last_dpo_loss.item())  # Log actual DPO loss
 
     def save(self):
         def save_checkpoint(rate, params):

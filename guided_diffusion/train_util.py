@@ -1,7 +1,8 @@
 import copy
 import functools
 import os
-
+from PIL import Image
+import numpy as np
 import blobfile as bf
 import torch as th
 import torch.distributed as dist
@@ -150,6 +151,34 @@ class TrainLoop:
             )
             self.opt.load_state_dict(state_dict)
 
+    def compute_rewards(self, images):
+        rewards = []
+        for img in images:
+            mnist_digit_confidence = self.mnist_classifier.predict(img)
+            is_mnist_reward = (mnist_digit_confidence if mnist_digit_confidence is not None else -0.5)
+            
+            equation_correctness = self.check_equation_correctness(img)
+            correctness_reward = 1.0 if equation_correctness else -1.0
+            
+            reward = 0.5 * is_mnist_reward + 0.5 * correctness_reward
+            rewards.append(reward)
+        return th.tensor(rewards, device=dist_util.dev())
+
+    def check_equation_correctness(self, img):
+        digits = self.extract_digits_from_image(img)
+        if len(digits) != 3:
+            return False
+        a, b, c = digits
+        return (a + b) == c
+    
+    def extract_digits_from_image(self, img):
+        digits = []
+        for digit in range(10):
+            confidence = self.mnist_classifier.models[digit](img.unsqueeze(0)).item()
+            if confidence > 0.5:
+                digits.append(digit)
+        return digits
+
     def run_loop(self):
         while (
             not self.lr_anneal_steps
@@ -202,12 +231,29 @@ class TrainLoop:
                 with self.ddp_model.no_sync():
                     losses = compute_losses()
 
-            if isinstance(self.schedule_sampler, LossAwareSampler):
-                self.schedule_sampler.update_with_local_losses(
-                    t, losses["loss"].detach()
-                )
-
-            loss = (losses["loss"] * weights).mean()
+            # # Compute rewards based on generated inpainted digits
+            generated_images = self.diffusion.p_sample_loop(
+                self.model,
+                (micro.shape[0], 3, 256, 256),
+                clip_denoised=True,
+                model_kwargs=micro_cond,
+            )
+            # save generated images every 500 steps
+            if self.step % 500 == 0:
+                if not os.path.exists('image_checking'):
+                    os.makedirs('image_checking')
+                img = generated_images[0].unsqueeze(0)  # Take first sample
+                img = ((img + 1) * 127.5).clamp(0, 255).to(th.uint8) 
+                img = img.permute(0, 2, 3, 1)
+                img = img.contiguous()
+                img = img.cpu().numpy()
+                img = img.squeeze(0)
+                img = Image.fromarray(img)
+                img.save(os.path.join('image_checking', f"sample_step_{self.step}_idx{i}.png"))
+            rewards = self.compute_rewards(generated_images)
+            
+            loss = (losses["loss"] * weights).mean() * (1 + rewards.mean())  # Scale loss by reward
+            
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )

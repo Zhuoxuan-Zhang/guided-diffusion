@@ -1,3 +1,4 @@
+import json
 import copy
 import functools
 import os
@@ -13,7 +14,7 @@ from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
-
+from .BinaryMNISTClassifier import BinaryMNISTClassifier
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
 # 20-21 within the first ~1K steps of training.
@@ -151,33 +152,77 @@ class TrainLoop:
             )
             self.opt.load_state_dict(state_dict)
 
-    def compute_rewards(self, images):
-        rewards = []
-        for img in images:
-            mnist_digit_confidence = self.mnist_classifier.predict(img)
-            is_mnist_reward = (mnist_digit_confidence if mnist_digit_confidence is not None else -0.5)
-            
-            equation_correctness = self.check_equation_correctness(img)
-            correctness_reward = 1.0 if equation_correctness else -1.0
-            
-            reward = 0.5 * is_mnist_reward + 0.5 * correctness_reward
-            rewards.append(reward)
-        return th.tensor(rewards, device=dist_util.dev())
+    def compute_rewards(self, img, metadata_path=None):
+        assert metadata_path is not None, "metadata_path is required"
+        #FIXME: assert batch size is 1
+        assert self.batch_size == 1, "batch size should be 1"
+        # TODO: extract digit based on json file
+        char_images, characters = self.decompose_image(img, metadata_path)
+        
+        is_correct, mnist_digit_count, confidences = self.check_equation_correctness(char_images, characters)
+        # Compute reward based on MNIST digit presence and equation correctness
+        mnist_digit_reward = mnist_digit_count / max(len(characters), 1)  # Fraction of valid MNIST digits
+        correctness_reward = 1.0 if is_correct else -1.0
+        confidence_reward = sum(confidences) / max(len(confidences), 1) if confidences else 0
+        
+        logger.log(f"Step: {self.step}, MNIST Digit Reward: {mnist_digit_reward}, Correctness Reward: {correctness_reward}, Confidence Reward: {confidence_reward}")
+        total_reward = 0.5 * mnist_digit_reward + 0.3 * correctness_reward + 0.2 * confidence_reward
+        return th.tensor([total_reward], device=dist_util.dev())
 
-    def check_equation_correctness(self, img):
-        digits = self.extract_digits_from_image(img)
-        if len(digits) != 3:
-            return False
-        a, b, c = digits
-        return (a + b) == c
+    def check_equation_correctness(self, char_images, characters):
+        classifier = BinaryMNISTClassifier()
+
+        equation = ""
+        mnist_digit_count = 0
+        confidences = []
+
+        for char_img, char in zip(char_images, characters):
+            if char in ["+", "*", '=']:
+                equation += char
+            else:
+                predicted_label, confidence = classifier.predict(char_img)
+                if predicted_label is not None and confidence > 0.5:
+                    mnist_digit_count += 1
+                    equation += str(predicted_label)
+                else:
+                    equation += str('-1')  # Placeholder for non-MNIST digits
+                
+                confidence = confidence if confidence is not None else 0.0
+                confidences.append(confidence)
+
+        # Evaluate the equation
+        try:
+            left_side, right_side = equation.split("=")
+            is_correct = eval(left_side) == eval(right_side)
+        except Exception as e:
+            is_correct = False
+
+        return is_correct, mnist_digit_count, confidences
     
-    def extract_digits_from_image(self, img):
-        digits = []
-        for digit in range(10):
-            confidence = self.mnist_classifier.models[digit](img.unsqueeze(0)).item()
-            if confidence > 0.5:
-                digits.append(digit)
-        return digits
+    def decompose_image(self, image, metadata_path):
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+
+        char_images = []
+        characters = []
+
+        # extract each character using the bounding boxes
+        for bbox in metadata["bboxes"]:
+            character = bbox["character"]
+            left = bbox["left"]
+            top = bbox["top"]
+            right = bbox["right"]
+            bottom = bbox["bottom"]
+            # image = image.convert("RGB")
+            char_image = image.crop((left, top, right, bottom))
+            # save char image
+            # if not os.path.exists('char_images'):
+                # os.makedirs('char_images')
+            # print(f"Step: {self.step}, BBox: {left, top, right, bottom}, Character: {character}")            
+            # char_image.save(os.path.join('char_images', f"char_{character}.png"))
+            char_images.append(char_image)
+            characters.append(character)
+        return char_images, characters
 
     def run_loop(self):
         while (
@@ -208,6 +253,12 @@ class TrainLoop:
 
     def forward_backward(self, batch, cond):
         self.mp_trainer.zero_grad()
+        assert batch.shape[0] == 1, "batch size should be 1"
+
+        # FIXME: hard-coded path for metadata
+        metadata_path = '/users/zzhan513/data/zzhan513/visual_reasoning/mnist_training_imgs/addition_training_imgs/metadata'
+        # getting ith path from metadata
+        files = [f for f in os.listdir(metadata_path) if os.path.isfile(os.path.join(metadata_path, f))]
         for i in range(0, batch.shape[0], self.microbatch):
             micro = batch[i : i + self.microbatch].to(dist_util.dev())
             micro_cond = {
@@ -216,7 +267,6 @@ class TrainLoop:
             }
             last_batch = (i + self.microbatch) >= batch.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
-
             compute_losses = functools.partial(
                 self.diffusion.training_losses,
                 self.ddp_model,
@@ -230,29 +280,34 @@ class TrainLoop:
             else:
                 with self.ddp_model.no_sync():
                     losses = compute_losses()
-
-            # # Compute rewards based on generated inpainted digits
+            # Compute rewards based on generated inpainted digits
             generated_images = self.diffusion.p_sample_loop(
                 self.model,
                 (micro.shape[0], 3, 256, 256),
                 clip_denoised=True,
                 model_kwargs=micro_cond,
             )
+            # FIXME: assert batch size is 1
+            assert generated_images.shape[0] == 1
+            img = generated_images[0].unsqueeze(0)  # Take first sample
+            img = ((img + 1) * 127.5).clamp(0, 255).to(th.uint8) 
+            img = img.permute(0, 2, 3, 1)
+            img = img.contiguous()
+            img = img.cpu().numpy()
+            img = img.squeeze(0)
+            img = Image.fromarray(img)
             # save generated images every 500 steps
             if self.step % 500 == 0:
                 if not os.path.exists('image_checking'):
                     os.makedirs('image_checking')
-                img = generated_images[0].unsqueeze(0)  # Take first sample
-                img = ((img + 1) * 127.5).clamp(0, 255).to(th.uint8) 
-                img = img.permute(0, 2, 3, 1)
-                img = img.contiguous()
-                img = img.cpu().numpy()
-                img = img.squeeze(0)
-                img = Image.fromarray(img)
                 img.save(os.path.join('image_checking', f"sample_step_{self.step}_idx{i}.png"))
-            rewards = self.compute_rewards(generated_images)
+            json_path = os.path.join(metadata_path, files[i])
+            rewards = self.compute_rewards(img, json_path)
+            logger.log(f"Step: {self.step}, Reward: {rewards.item()}")
             
-            loss = (losses["loss"] * weights).mean() * (1 + rewards.mean())  # Scale loss by reward
+            logger.log(f'original losses: {(losses["loss"] * weights).mean()}')
+            loss = (losses["loss"] * weights).mean() * th.exp(-rewards.mean()) 
+            logger.log(f'scaled losses: {loss.item()}')
             
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}

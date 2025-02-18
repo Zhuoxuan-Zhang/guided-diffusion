@@ -16,7 +16,7 @@ def load_data(
     class_cond=False,
     deterministic=False,
     random_crop=False,
-    random_flip=True,
+    random_flip=False,
 ):
     """
     For a dataset, create a generator over (images, kwargs) pairs.
@@ -61,7 +61,7 @@ def load_data(
         )
     else:
         loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True
+            dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True
         )
     while True:
         yield from loader
@@ -88,7 +88,7 @@ class ImageDataset(Dataset):
         shard=0,
         num_shards=1,
         random_crop=False,
-        random_flip=True,
+        random_flip=False,
     ):
         super().__init__()
         self.resolution = resolution
@@ -112,8 +112,8 @@ class ImageDataset(Dataset):
         else:
             arr = center_crop_arr(pil_image, self.resolution)
 
-        if self.random_flip and random.random() < 0.5:
-            arr = arr[:, ::-1]
+        # if self.random_flip and random.random() < 0.5:
+        #     arr = arr[:, ::-1]
 
         arr = arr.astype(np.float32) / 127.5 - 1
 

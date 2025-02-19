@@ -61,7 +61,7 @@ def load_data(
         )
     else:
         loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True
+            dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True
         )
     while True:
         yield from loader

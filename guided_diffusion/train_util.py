@@ -1,7 +1,7 @@
 import copy
 import functools
 import os
-
+from PIL import Image
 import blobfile as bf
 import torch as th
 import torch.distributed as dist
@@ -18,18 +18,23 @@ from .resample import LossAwareSampler, UniformSampler
 INITIAL_LOG_LOSS_SCALE = 20.0
 
 
-def dpo_loss(preferred_loss, rejected_loss, beta=0.1):
+def compute_dpo_loss(preferred_loss, rejected_loss, weights=None, beta=0.05):
     """Compute DPO loss with better numerical stability."""
     diff = (preferred_loss - rejected_loss) / (beta + 1e-8)
-    diff = th.clamp(diff, min=-5, max=5)
+    diff = th.clamp(diff, min=-10, max=10)
 
     # log-sigmoid computation
-    loss = -th.nn.functional.logsigmoid(diff).mean()
+    loss = -th.nn.functional.logsigmoid(diff)
+
+    if weights is not None:
+        loss = loss * weights
+
+    loss = loss.mean()
 
     # If NaN is detected, return zero loss
     if th.isnan(loss).any() or th.isinf(loss).any():
         print("NaN detected in DPO loss! Returning zero loss...")
-        return loss.detach()  # Preserve gradient tracking
+        return th.tensor(0.0, device=loss.device, requires_grad=True)
     return loss
 
 
@@ -74,9 +79,10 @@ class TrainLoop:
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
-        self.last_loss_pos = None
-        self.last_loss_neg = None
-        self.last_dpo_loss = None
+        self.loss_pos = None
+        self.loss_neg = None
+        self.dpo_loss = None
+        self.overall_loss = None
 
         self.step = 0
         self.resume_step = 0
@@ -92,7 +98,9 @@ class TrainLoop:
         )
 
         self.opt = AdamW(
-            self.mp_trainer.master_params, lr=self.lr * 0.5, weight_decay=self.weight_decay
+            self.mp_trainer.master_params,
+            lr=self.lr * 0.5,
+            weight_decay=self.weight_decay,
         )
         if self.resume_step:
             self._load_optimizer_state()
@@ -194,11 +202,6 @@ class TrainLoop:
 
     def run_step(self, batch_pos, batch_neg, cond_pos, cond_neg):
         self.forward_backward(batch_pos, batch_neg, cond_pos, cond_neg)
-        grad_norm = th.nn.utils.clip_grad_norm_(self.mp_trainer.master_params, max_norm=1.0)
-        if grad_norm > 5.0:
-            print(f"High gradient norm detected: {grad_norm}. Reducing learning rate...")
-            for param_group in self.opt.param_groups:
-                param_group["lr"] = max(param_group["lr"] * 0.9, 1e-6)   # Reduce learning rate by 10%
         took_step = self.mp_trainer.optimize(self.opt)
         if took_step:
             self._update_ema()
@@ -206,9 +209,7 @@ class TrainLoop:
         self.log_step()
 
     def forward_backward(self, batch_pos, batch_neg, cond_pos, cond_neg):
-        """Modified forward_backward to apply DPO loss."""
         self.mp_trainer.zero_grad()
-
         for i in range(0, batch_pos.shape[0], self.microbatch):
             micro_pos = batch_pos[i : i + self.microbatch].to(dist_util.dev())
             micro_neg = batch_neg[i : i + self.microbatch].to(dist_util.dev())
@@ -224,41 +225,85 @@ class TrainLoop:
             t_pos, weights_pos = self.schedule_sampler.sample(
                 micro_pos.shape[0], dist_util.dev()
             )
-            t_neg, weights_neg = self.schedule_sampler.sample(micro_neg.shape[0], dist_util.dev())
-
-            losses_pos = self.diffusion.training_losses(
-                self.ddp_model, micro_pos, t_pos, model_kwargs=micro_pos_cond
-            )
-            losses_neg = self.diffusion.training_losses(
-                self.ddp_model, micro_neg, t_neg, model_kwargs=micro_neg_cond
+            t_neg, weights_neg = self.schedule_sampler.sample(
+                micro_neg.shape[0], dist_util.dev()
             )
 
-            # check for NaNs before computing loss
-            if th.isnan(losses_pos["loss"]).any() or th.isnan(losses_neg["loss"]).any():
-                print("NaN detected in losses, skipping step...")
-                self.mp_trainer.zero_grad()  # Reset gradients
-                return
-            beta = 0.02
-            if self.step % 500 == 0:
-                beta = max(beta * (0.99 ** self.step), 0.005)  # Gradually decrease beta
+            # compute positive and negative losses
+            compute_losses = functools.partial(
+                self.diffusion.training_losses,
+                self.ddp_model,
+                micro_pos,
+                t_pos,
+                model_kwargs=micro_pos_cond,
+            )
+            if last_batch or not self.use_ddp:
+                losses_pos = compute_losses()
+            else:
+                with self.ddp_model.no_sync():
+                    losses_pos = compute_losses()
 
+            compute_losses = functools.partial(
+                self.diffusion.training_losses,
+                self.ddp_model,
+                micro_neg,
+                t_neg,
+                model_kwargs=micro_neg_cond,
+            )
+            if last_batch or not self.use_ddp:
+                losses_neg = compute_losses()
+            else:
+                with self.ddp_model.no_sync():
+                    losses_neg = compute_losses()
+
+
+            loss_pos = (losses_pos["loss"] * weights_pos).mean()
+            loss_neg = (losses_neg["loss"] * weights_neg).mean()
+
+            # compute DPO loss
             valid_samples = losses_pos["loss"] < losses_neg["loss"]
             if not valid_samples.all():  # If any invalid samples exist
                 # print(f"Warning: {(~valid_samples).sum().item()} invalid samples found. Filtering...")
                 losses_pos["loss"] = losses_pos["loss"][valid_samples]
                 losses_neg["loss"] = losses_neg["loss"][valid_samples]
                 if losses_pos["loss"].numel() == 0:  # If no valid samples left, skip
-                    self.mp_trainer.zero_grad()
+                    # self.mp_trainer.zero_grad()
                     return
 
-            loss = dpo_loss(losses_pos["loss"], losses_neg["loss"], beta=beta)
-            
-            
-            self.last_loss_pos = losses_pos["loss"].mean().detach()
-            self.last_loss_neg = losses_neg["loss"].mean().detach()
-            self.last_dpo_loss = loss.detach()
+            dpo_loss = compute_dpo_loss(losses_pos["loss"], losses_neg["loss"], weights_pos, beta=0.05)
 
-            self.mp_trainer.backward(loss)
+            # overall_loss = loss_pos + dpo_loss
+
+            if isinstance(self.schedule_sampler, LossAwareSampler):
+                self.schedule_sampler.update_with_local_losses(
+                    t_pos, dpo_loss.detach()
+                )
+            # log the loss
+            self.loss_pos = loss_pos
+            self.loss_neg = loss_neg
+            self.dpo_loss = dpo_loss
+
+            # save an example image every 1000 steps
+            if self.step % 1000 == 0:
+                generated_images = self.diffusion.p_sample_loop(
+                    self.model,
+                    (micro_pos.shape[0], 3, 256, 256),
+                    clip_denoised=True,
+                    model_kwargs=micro_pos_cond,
+                    )
+                # FIXME: assert batch size is 1
+                img = generated_images[0].unsqueeze(0)  # Take first sample
+                img = ((img + 1) * 127.5).clamp(0, 255).to(th.uint8) 
+                img = img.permute(0, 2, 3, 1)
+                img = img.contiguous()
+                img = img.cpu().numpy()
+                img = img.squeeze(0)
+                img = Image.fromarray(img)
+                if not os.path.exists('image_checking'):
+                    os.makedirs('image_checking')
+                img.save(os.path.join('image_checking', f"sample_step_{self.step}_idx{i}.png"))
+
+            self.mp_trainer.backward(dpo_loss)
 
     def _update_ema(self):
         for rate, params in zip(self.ema_rate, self.ema_params):
@@ -275,9 +320,10 @@ class TrainLoop:
     def log_step(self):
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
-        logger.logkv("preferred_loss", self.last_loss_pos)
-        logger.logkv("rejected_loss", self.last_loss_neg)
-        logger.logkv("dpo_loss", self.last_dpo_loss.item())  # Log actual DPO loss
+        logger.logkv("preferred_loss", self.loss_pos.item())
+        logger.logkv("rejected_loss", self.loss_neg.item())
+        logger.logkv("dpo_loss", self.dpo_loss.item())
+        # logger.logkv("overall_loss", self.overall_loss.item())
 
     def save(self):
         def save_checkpoint(rate, params):

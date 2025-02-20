@@ -9,17 +9,34 @@ import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
+import torchvision.transforms as transforms
+import torch.nn as nn
+import torchvision.models as models
+
 
 from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
-from .BinaryMNISTClassifier import BinaryMNISTClassifier
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
 # 20-21 within the first ~1K steps of training.
 INITIAL_LOG_LOSS_SCALE = 20.0
 
+class ResNetSymmetryClassifier(nn.Module):
+    def __init__(self):
+        super(ResNetSymmetryClassifier, self).__init__()
+        self.model = models.resnet18(pretrained=True)
+        self.model.fc = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),  # Dropout to prevent overfitting
+            nn.Linear(256, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.model(x)
 
 class TrainLoop:
     def __init__(
@@ -152,77 +169,41 @@ class TrainLoop:
             )
             self.opt.load_state_dict(state_dict)
 
-    def compute_rewards(self, img, metadata_path=None):
-        assert metadata_path is not None, "metadata_path is required"
-        #FIXME: assert batch size is 1
-        assert self.batch_size == 1, "batch size should be 1"
-        char_images, characters = self.decompose_image(img, metadata_path)
+    def compute_rewards(self, img, classifier_path):
+        """
+        Compute rewards based on the trained symmetry classifier.
+        - Higher reward if the image is more symmetric.
+        - Lower reward if it deviates from 180-degree symmetry.
+        """
+        assert self.batch_size == 1, "Batch size should be 1 for reward computation."
+
+        # Load the symmetry classifier
+        classifier = ResNetSymmetryClassifier()
+        classifier.load_state_dict(th.load(classifier_path, map_location=dist_util.dev()))
+        classifier.eval()  # Set to eval mode
+
+        # Define transformation for classifier input
+        transform = transforms.Compose([
+            transforms.Resize((256, 256)),  # Ensure size matches the classifier's training
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        ])
+
+        img = transform(img).unsqueeze(0)
+
+        with th.no_grad():
+            symmetry_score = classifier(img).item()
+
+        # Reward is directly the classifier’s confidence in symmetry
+        reward = symmetry_score  
+
+        # Normalize reward between -1 and 1 for stable PPO updates
+        reward = 2 * (reward - 0.5)  # Maps classifier output [0,1] to [-1,1]
+
+        logger.log(f"Step: {self.step}, Symmetry Reward: {reward:.4f}")
         
-        is_correct, mnist_digit_count, confidences = self.check_equation_correctness(char_images, characters)
-        # Compute reward based on MNIST digit presence and equation correctness
-        mnist_digit_reward = mnist_digit_count / max(len(characters), 1)  # Fraction of valid MNIST digits
-        correctness_reward = 1.0 if is_correct else -1.0
-        confidence_reward = sum(confidences) / max(len(confidences), 1) if confidences else 0
-        
-        logger.log(f"Step: {self.step}, MNIST Digit Reward: {mnist_digit_reward}, Correctness Reward: {correctness_reward}, Confidence Reward: {confidence_reward}")
-        total_reward = 0.5 * mnist_digit_reward + 0.3 * correctness_reward + 0.2 * confidence_reward
-        return th.tensor([total_reward], device=dist_util.dev())
-
-    def check_equation_correctness(self, char_images, characters):
-        classifier = BinaryMNISTClassifier()
-
-        equation = ""
-        mnist_digit_count = 0
-        confidences = []
-
-        for char_img, char in zip(char_images, characters):
-            if char in ["+", "*", '=']:
-                equation += char
-            else:
-                predicted_label, confidence = classifier.predict(char_img)
-                if predicted_label is not None and confidence > 0.5:
-                    mnist_digit_count += 1
-                    equation += str(predicted_label)
-                else:
-                    equation += str('-1')  # Placeholder for non-MNIST digits
-                
-                confidence = confidence if confidence is not None else 0.0
-                confidences.append(confidence)
-
-        # Evaluate the equation
-        try:
-            left_side, right_side = equation.split("=")
-            is_correct = eval(left_side) == eval(right_side)
-        except Exception as e:
-            is_correct = False
-
-        return is_correct, mnist_digit_count, confidences
+        return th.tensor([reward], device=dist_util.dev())
     
-    def decompose_image(self, image, metadata_path):
-        with open(metadata_path, "r") as f:
-            metadata = json.load(f)
-
-        char_images = []
-        characters = []
-
-        # extract each character using the bounding boxes
-        for bbox in metadata["bboxes"]:
-            character = bbox["character"]
-            left = bbox["left"]
-            top = bbox["top"]
-            right = bbox["right"]
-            bottom = bbox["bottom"]
-            char_image = image.crop((left, top, right, bottom))
-            # save char image
-            # if not os.path.exists('char_images'):
-            #     os.makedirs('char_images')
-            # print(f"Step: {self.step}, BBox: {left, top, right, bottom}, Character: {character}, char_image{char_image}")
-            # char_image.save(os.path.join('char_images', f"char_{character}_{left}.png"))
-            char_images.append(char_image)
-            characters.append(character)            
-        # image.save(os.path.join('char_images', f"original.png"))
-        # exit()
-        return char_images, characters
 
     def run_loop(self):
         while (
@@ -255,10 +236,6 @@ class TrainLoop:
         self.mp_trainer.zero_grad()
         assert batch.shape[0] == 1, "batch size should be 1"
 
-        # FIXME: hard-coded path for metadata
-        metadata_path = '/users/zzhan513/data/zzhan513/visual_reasoning/mnist_training_imgs/addition_training_imgs/metadata'
-        # getting ith path from metadata
-        files = [f for f in os.listdir(metadata_path) if os.path.isfile(os.path.join(metadata_path, f))]
         for i in range(0, batch.shape[0], self.microbatch):
             micro = batch[i : i + self.microbatch].to(dist_util.dev())
             micro_cond = {
@@ -296,18 +273,20 @@ class TrainLoop:
             img = img.cpu().numpy()
             img = img.squeeze(0)
             img = Image.fromarray(img)
-            # save generated images every 500 steps
+            # save generated images every 50 steps
             if self.step % 50 == 0:
-                if not os.path.exists('image_checking'):
-                    os.makedirs('image_checking')
-                img.save(os.path.join('image_checking', f"sample_step_{self.step}_idx{i}.png"))
-            json_path = os.path.join(metadata_path, files[i])
-            rewards = self.compute_rewards(img, json_path)
+                if not os.path.exists('arc_image_checking'):
+                    os.makedirs('arc_image_checking')
+                img.save(os.path.join('arc_image_checking', f"sample_step_{self.step}_idx{i}.png"))
+            # FIXME: hardcode classifier path
+            rewards = self.compute_rewards(img, classifier_path='reward_models/symmetry_classifier.pth')
             logger.log(f"Step: {self.step}, Reward: {rewards.item()}")
-            
-            logger.log(f'original losses: {(losses["loss"] * weights).mean()}')
-            loss = (losses["loss"] * weights).mean() * th.exp(-rewards.mean()) 
-            logger.log(f'scaled losses: {loss.item()}')
+
+            # Scale loss using PPO-style reward adjustment
+            original_loss = (losses["loss"] * weights).mean()
+            loss = original_loss * th.exp(-rewards.mean())  # PPO reward shaping
+
+            logger.log(f'Original Loss: {original_loss.item()}, PPO Scaled Loss: {loss.item()}')
             
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}

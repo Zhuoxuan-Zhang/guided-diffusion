@@ -1,11 +1,11 @@
 #!/bin/bash
 # Set dataset path
 DATASET_PATH="/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/rotational_contrast_pairs"
-PRETRAINED_CHECKPOINT="models/256x256_diffusion.pt"
+PRETRAINED_CHECKPOINT="no_flip_rotational_model_checkpoints/model060000.pt"
 
 # Reduce memory usage
-MODEL_FLAGS="--image_size 256 --num_channels 256 --num_res_blocks 2 --num_head_channels 64 --learn_sigma True --use_scale_shift_norm True --attention_resolutions 32,16,8 --class_cond True --resblock_updown True --use_fp16 True"
+MODEL_FLAGS="--image_size 256 --num_channels 256 --num_res_blocks 2 --num_head_channels 64 --learn_sigma True --use_scale_shift_norm True --attention_resolutions 32,16,8 --class_cond True --resblock_updown True"
 DIFFUSION_FLAGS="--diffusion_steps 200 --noise_schedule linear"
-TRAIN_FLAGS="--lr 5e-6 --batch_size 1 --use_fp16 True --data_dir $DATASET_PATH --resume_checkpoint $PRETRAINED_CHECKPOINT"
+TRAIN_FLAGS="--lr 5e-6 --batch_size 1 --microbatch 1 --use_fp16 True --data_dir $DATASET_PATH --resume_checkpoint $PRETRAINED_CHECKPOINT"
 
-python -m scripts.image_train $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS
+mpiexec -n 1 python -m scripts.image_train $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS

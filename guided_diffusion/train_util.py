@@ -18,23 +18,31 @@ from .resample import LossAwareSampler, UniformSampler
 INITIAL_LOG_LOSS_SCALE = 20.0
 
 
-def compute_dpo_loss(preferred_loss, rejected_loss, weights=None, beta=0.05):
-    """Compute DPO loss with better numerical stability."""
-    diff = (preferred_loss - rejected_loss) / (beta + 1e-8)
-    diff = th.clamp(diff, min=-10, max=10)
+def compute_dpo_loss(model_losses_w, model_losses_l, ref_losses_w, ref_losses_l, beta=0.1):
+    """
+    Compute the Direct Preference Optimization (DPO) loss using both the model and reference model.
+    
+    Args:
+        model_losses_w (Tensor): Preferred losses from the model.
+        model_losses_l (Tensor): Rejected losses from the model.
+        ref_losses_w (Tensor): Preferred losses from the reference model.
+        ref_losses_l (Tensor): Rejected losses from the reference model.
+        beta (float): Scaling term.
 
-    # log-sigmoid computation
-    loss = -th.nn.functional.logsigmoid(diff)
+    Returns:
+        Tensor: The computed DPO loss.
+    """
+    model_diff = model_losses_w - model_losses_l
+    ref_diff = ref_losses_w - ref_losses_l
 
-    if weights is not None:
-        loss = loss * weights
+    scale_term = -0.5 * beta
+    inside_term = scale_term * (model_diff - ref_diff)
 
-    loss = loss.mean()
+    # Clamp values for numerical stability before applying logsigmoid
+    inside_term = th.clamp(inside_term, min=-10, max=10)
 
-    # If NaN is detected, return zero loss
-    if th.isnan(loss).any() or th.isinf(loss).any():
-        print("NaN detected in DPO loss! Returning zero loss...")
-        return th.tensor(0.0, device=loss.device, requires_grad=True)
+    loss = -th.nn.functional.logsigmoid(inside_term).mean()
+
     return loss
 
 
@@ -43,6 +51,7 @@ class TrainLoop:
         self,
         *,
         model,
+        reference_model,
         diffusion,
         preferred_data,
         reject_data,
@@ -60,6 +69,7 @@ class TrainLoop:
         lr_anneal_steps=0,
     ):
         self.model = model
+        self.reference_model = reference_model
         self.diffusion = diffusion
         self.preferred_data = preferred_data
         self.reject_data = reject_data
@@ -125,6 +135,14 @@ class TrainLoop:
                 bucket_cap_mb=128,
                 find_unused_parameters=False,
             )
+            self.ddp_reference_model = DDP(
+                self.reference_model,
+                device_ids=[dist_util.dev()],
+                output_device=dist_util.dev(),
+                broadcast_buffers=False,
+                bucket_cap_mb=128,
+                find_unused_parameters=False,
+            )
         else:
             if dist.get_world_size() > 1:
                 logger.warn(
@@ -133,6 +151,7 @@ class TrainLoop:
                 )
             self.use_ddp = False
             self.ddp_model = self.model
+            self.ddp_reference_model = self.reference_model
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
@@ -141,13 +160,20 @@ class TrainLoop:
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
             if dist.get_rank() == 0:
                 logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
+                logger.log(f"device: {dist_util.dev()}")
                 self.model.load_state_dict(
+                    dist_util.load_state_dict(
+                        resume_checkpoint, map_location=dist_util.dev()
+                    )
+                )
+                self.reference_model.load_state_dict(
                     dist_util.load_state_dict(
                         resume_checkpoint, map_location=dist_util.dev()
                     )
                 )
 
         dist_util.sync_params(self.model.parameters())
+        dist_util.sync_params(self.reference_model.parameters())
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
@@ -256,21 +282,36 @@ class TrainLoop:
                 with self.ddp_model.no_sync():
                     losses_neg = compute_losses()
 
+            compute_losses = functools.partial(
+                self.diffusion.training_losses,
+                self.ddp_reference_model,
+                micro_pos,
+                t_pos,
+                model_kwargs=micro_pos_cond,
+            )
+            if last_batch or not self.use_ddp:
+                ref_losses_pos = compute_losses()
+            else:
+                with self.ddp_reference_model.no_sync():
+                    ref_losses_pos = compute_losses()
 
-            loss_pos = (losses_pos["loss"] * weights_pos).mean()
-            loss_neg = (losses_neg["loss"] * weights_neg).mean()
-
+            compute_losses = functools.partial(
+                self.diffusion.training_losses,
+                self.ddp_reference_model,
+                micro_neg,
+                t_neg,
+                model_kwargs=micro_neg_cond,
+            )
+            if last_batch or not self.use_ddp:
+                ref_losses_neg = compute_losses()
+            else:
+                with self.ddp_reference_model.no_sync():
+                    ref_losses_neg = compute_losses()
+            
+            model_losses_w, model_losses_l = losses_pos["loss"], losses_neg["loss"]
+            ref_losses_w, ref_losses_l = ref_losses_pos["loss"], ref_losses_neg["loss"]
             # compute DPO loss
-            valid_samples = losses_pos["loss"] < losses_neg["loss"]
-            if not valid_samples.all():  # If any invalid samples exist
-                # print(f"Warning: {(~valid_samples).sum().item()} invalid samples found. Filtering...")
-                losses_pos["loss"] = losses_pos["loss"][valid_samples]
-                losses_neg["loss"] = losses_neg["loss"][valid_samples]
-                if losses_pos["loss"].numel() == 0:  # If no valid samples left, skip
-                    # self.mp_trainer.zero_grad()
-                    return
-
-            dpo_loss = compute_dpo_loss(losses_pos["loss"], losses_neg["loss"], weights_pos, beta=0.05)
+            dpo_loss = compute_dpo_loss(model_losses_w, model_losses_l, ref_losses_w, ref_losses_l, beta=0.08)
 
             # overall_loss = loss_pos + dpo_loss
 
@@ -279,8 +320,8 @@ class TrainLoop:
                     t_pos, dpo_loss.detach()
                 )
             # log the loss
-            self.loss_pos = loss_pos
-            self.loss_neg = loss_neg
+            self.loss_pos = model_losses_w
+            self.loss_neg = model_losses_l
             self.dpo_loss = dpo_loss
 
             # save an example image every 1000 steps

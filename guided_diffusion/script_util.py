@@ -129,7 +129,7 @@ def create_model_and_diffusion(
         use_scale_shift_norm=use_scale_shift_norm,
         dropout=dropout,
         resblock_updown=resblock_updown,
-        use_fp16=True,
+        use_fp16=use_fp16,
         use_new_attention_order=use_new_attention_order,
     )
     diffusion = create_gaussian_diffusion(
@@ -142,7 +142,7 @@ def create_model_and_diffusion(
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
     )
-    return model, reference_model, diffusion
+    return model, model, diffusion
 
 
 def create_model(

@@ -20,10 +20,11 @@ def main():
     logger.configure(dir='model_checkpoints')
 
     logger.log("creating model and diffusion...")
-    model, diffusion = create_model_and_diffusion(
+    model, reference_model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
     model.to(dist_util.dev())
+    reference_model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log("creating data loader...")
@@ -43,6 +44,7 @@ def main():
     logger.log("training with DPO...")
     TrainLoop(
         model=model,
+        reference_model=reference_model,
         diffusion=diffusion,
         preferred_data=preferred_data,
         reject_data=reject_data,
@@ -71,9 +73,9 @@ def create_argparser():
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=10,
-        save_interval=10000,
+        save_interval=1000,
         resume_checkpoint="",
-        use_fp16=False,
+        use_fp16=True,
         fp16_scale_growth=1e-4,
     )
     defaults.update(model_and_diffusion_defaults())

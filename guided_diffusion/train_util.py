@@ -156,7 +156,6 @@ class TrainLoop:
         assert metadata_path is not None, "metadata_path is required"
         #FIXME: assert batch size is 1
         assert self.batch_size == 1, "batch size should be 1"
-        # TODO: extract digit based on json file
         char_images, characters = self.decompose_image(img, metadata_path)
         
         is_correct, mnist_digit_count, confidences = self.check_equation_correctness(char_images, characters)
@@ -213,15 +212,16 @@ class TrainLoop:
             top = bbox["top"]
             right = bbox["right"]
             bottom = bbox["bottom"]
-            # image = image.convert("RGB")
             char_image = image.crop((left, top, right, bottom))
             # save char image
             # if not os.path.exists('char_images'):
-                # os.makedirs('char_images')
-            # print(f"Step: {self.step}, BBox: {left, top, right, bottom}, Character: {character}")            
-            # char_image.save(os.path.join('char_images', f"char_{character}.png"))
+            #     os.makedirs('char_images')
+            # print(f"Step: {self.step}, BBox: {left, top, right, bottom}, Character: {character}, char_image{char_image}")
+            # char_image.save(os.path.join('char_images', f"char_{character}_{left}.png"))
             char_images.append(char_image)
-            characters.append(character)
+            characters.append(character)            
+        # image.save(os.path.join('char_images', f"original.png"))
+        # exit()
         return char_images, characters
 
     def run_loop(self):
@@ -297,7 +297,7 @@ class TrainLoop:
             img = img.squeeze(0)
             img = Image.fromarray(img)
             # save generated images every 500 steps
-            if self.step % 500 == 0:
+            if self.step % 50 == 0:
                 if not os.path.exists('image_checking'):
                     os.makedirs('image_checking')
                 img.save(os.path.join('image_checking', f"sample_step_{self.step}_idx{i}.png"))

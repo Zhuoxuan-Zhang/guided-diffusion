@@ -332,7 +332,6 @@ class TrainLoop:
                     clip_denoised=True,
                     model_kwargs=micro_pos_cond,
                     )
-                # FIXME: assert batch size is 1
                 img = generated_images[0].unsqueeze(0)  # Take first sample
                 img = ((img + 1) * 127.5).clamp(0, 255).to(th.uint8) 
                 img = img.permute(0, 2, 3, 1)

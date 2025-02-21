@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set dataset path
-DATASET_PATH="/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/rotational_contrast_pairs/preferred"
+DATASET_PATH="/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/rotational_arc_for_training/gt"
 PRETRAINED_CHECKPOINT="no_flip_rotational_model_checkpoints/model060000.pt"
 
 # Reduce memory usage

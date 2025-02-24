@@ -11,7 +11,23 @@
 # Epoch [10/10], Loss: 89.3838, Accuracy: 0.9103
 # Evaluating on Test Set...
 # Test Accuracy: 0.9206
-# Model saved as symmetry_classifier.pth
+# Model saved as is_rotational_classifier.pth
+
+# Starting Training...
+# Epoch [1/10], Loss: 44.4117, Accuracy: 0.9595
+# Epoch [2/10], Loss: 16.7685, Accuracy: 0.9920
+# Epoch [3/10], Loss: 14.3825, Accuracy: 0.9930
+# Epoch [4/10], Loss: 14.3388, Accuracy: 0.9934
+# Epoch [5/10], Loss: 14.4424, Accuracy: 0.9932
+# Epoch [6/10], Loss: 13.7049, Accuracy: 0.9934
+# Epoch [7/10], Loss: 12.7536, Accuracy: 0.9931
+# Epoch [8/10], Loss: 11.2195, Accuracy: 0.9933
+# Epoch [9/10], Loss: 7.5279, Accuracy: 0.9955
+# Epoch [10/10], Loss: 4.4099, Accuracy: 0.9970
+# Evaluating on Test Set...
+# Test Accuracy: 0.9956
+# Model saved as is_horizontal_classifier.pth
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -25,7 +41,7 @@ from PIL import Image
 # 1. Custom Dataset Loader
 # =============================
 class SymmetryDataset(Dataset):
-    def __init__(self, root_dir="/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/rotational_contrast_pairs", transform=None):
+    def __init__(self, root_dir="/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/horizontal_contrast_pairs", transform=None):
         """
         root_dir: Path to dataset folder.
                   It should contain two subfolders:
@@ -61,7 +77,7 @@ class SymmetryDataset(Dataset):
 # =============================
 transform = transforms.Compose([
     transforms.Resize((256, 256)),
-    transforms.RandomRotation(10),  # Slight rotation for robustness
+    # transforms.RandomRotation(10),  # Slight rotation for robustness
     transforms.RandomHorizontalFlip(p=0.5),  # Flip images randomly
     transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),  # Small translation
     transforms.ColorJitter(brightness=0.2, contrast=0.2),  # Change brightness/contrast
@@ -72,7 +88,7 @@ transform = transforms.Compose([
 # =============================
 # 3. Load Dataset
 # =============================
-dataset_path = "/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/rotational_contrast_pairs"  # Replace with actual path
+dataset_path = "/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/horizontal_contrast_pairs"
 dataset = SymmetryDataset(root_dir=dataset_path, transform=transform)
 
 # Train-Test Split
@@ -161,5 +177,5 @@ print(f"Test Accuracy: {test_accuracy:.4f}")
 # =============================
 # 8. Save the Model
 # =============================
-torch.save(model.state_dict(), "symmetry_classifier.pth")
-print("Model saved as symmetry_classifier.pth")
+torch.save(model.state_dict(), "is_horizontal_classifier.pth")
+print("Model saved as is_horizontal_classifier.pth")

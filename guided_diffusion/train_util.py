@@ -304,7 +304,7 @@ class TrainLoop:
             # Compute rewards based on generated inpainted digits
             generated_images = self.diffusion.p_sample_loop(
                 self.model,
-                (micro.shape[0], 3, 256, 256),
+                (micro.shape[0], 1, 256, 256),
                 clip_denoised=True,
                 model_kwargs=micro_cond,
             )
@@ -316,19 +316,23 @@ class TrainLoop:
             img = img.contiguous()
             img = img.cpu().numpy()
             img = img.squeeze(0)
+            # If the image still has a singleton channel dimension, remove it.
+            if img.ndim == 3 and img.shape[-1] == 1:
+                img = img.squeeze(-1)
             img = Image.fromarray(img)
             # save generated images every 500 steps
             if self.step % 50 == 0:
                 if not os.path.exists('image_checking'):
                     os.makedirs('image_checking')
                 img.save(os.path.join('image_checking', f"sample_step_{self.step}_idx{i}.png"))
-            json_path = os.path.join(metadata_path, files[i])
-            rewards = self.compute_rewards(img, json_path)
-            logger.log(f"Step: {self.step}, Reward: {rewards.item()}")
+            # json_path = os.path.join(metadata_path, files[i])
+            # rewards = self.compute_rewards(img, json_path)
+            # logger.log(f"Step: {self.step}, Reward: {rewards.item()}")
             
             logger.log(f'original losses: {(losses["loss"] * weights).mean()}')
-            loss = (losses["loss"] * weights).mean() * th.exp(-rewards.mean()) 
-            logger.log(f'scaled losses: {loss.item()}')
+            loss = (losses["loss"] * weights).mean()
+            # loss = (losses["loss"] * weights).mean() * th.exp(-rewards.mean()) 
+            # logger.log(f'scaled losses: {loss.item()}')
             
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}

@@ -105,7 +105,7 @@ class ImageDataset(Dataset):
         with bf.BlobFile(path, "rb") as f:
             pil_image = Image.open(f)
             pil_image.load()
-        pil_image = pil_image.convert("RGB")
+        pil_image = pil_image.convert("L")
 
         if self.random_crop:
             arr = random_crop_arr(pil_image, self.resolution)
@@ -114,6 +114,9 @@ class ImageDataset(Dataset):
 
         # if self.random_flip and random.random() < 0.5:
         #     arr = arr[:, ::-1]
+        # For grayscale images, the array shape is (H, W). Expand dims to get (H, W, 1)
+        if arr.ndim == 2:
+            arr = np.expand_dims(arr, axis=-1)
 
         arr = arr.astype(np.float32) / 127.5 - 1
 

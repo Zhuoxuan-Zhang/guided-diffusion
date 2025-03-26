@@ -15,6 +15,7 @@ from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
 from .BinaryMNISTClassifier import BinaryMNISTClassifier
+from .MNISTClassifier import UnifiedRGBMNISTClassifier
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
 # 20-21 within the first ~1K steps of training.
@@ -53,7 +54,7 @@ class TrainLoop:
             else [float(x) for x in ema_rate.split(",")]
         )
         self.log_interval = log_interval
-        self.save_interval = save_interval
+        self.save_interval = 500
         self.resume_checkpoint = resume_checkpoint
         self.use_fp16 = use_fp16
         self.fp16_scale_growth = fp16_scale_growth
@@ -66,6 +67,9 @@ class TrainLoop:
         self.global_batch = self.batch_size * dist.get_world_size()
 
         self.sync_cuda = th.cuda.is_available()
+
+        self.mnist_classifier = UnifiedRGBMNISTClassifier()
+        self.mnist_classifier.model.eval()  # Set to evaluation mode
 
         self._load_and_sync_parameters()
         self.mp_trainer = MixedPrecisionTrainer(
@@ -158,45 +162,62 @@ class TrainLoop:
         assert self.batch_size == 1, "batch size should be 1"
         char_images, characters = self.decompose_image(img, metadata_path)
         
-        is_correct, mnist_digit_count, confidences = self.check_equation_correctness(char_images, characters)
+        is_correct, mnist_digit_count, confidences, masked_number_length = self.check_equation_correctness(char_images, characters)
         # Compute reward based on MNIST digit presence and equation correctness
-        mnist_digit_reward = mnist_digit_count / max(len(characters), 1)  # Fraction of valid MNIST digits
+        mnist_digit_reward = mnist_digit_count / max(len(characters) - 2, 1)  # Fraction of valid MNIST digits
         correctness_reward = 1.0 if is_correct else -1.0
-        confidence_reward = sum(confidences) / max(len(confidences), 1) if confidences else 0
+        confidence_reward = sum(confidences) / max(len(characters) - 2, 1) if confidences else 0
         
         logger.log(f"Step: {self.step}, MNIST Digit Reward: {mnist_digit_reward}, Correctness Reward: {correctness_reward}, Confidence Reward: {confidence_reward}")
-        total_reward = 0.5 * mnist_digit_reward + 0.3 * correctness_reward + 0.2 * confidence_reward
+        # total_reward = 0.5 * mnist_digit_reward + 0.3 * correctness_reward + 0.2 * confidence_reward
+        total_reward =  0.5 * mnist_digit_reward + 0.3 * correctness_reward
         return th.tensor([total_reward], device=dist_util.dev())
 
     def check_equation_correctness(self, char_images, characters):
-        classifier = BinaryMNISTClassifier()
-
         equation = ""
         mnist_digit_count = 0
         confidences = []
-
+        entropy_penalty = 0.0
+        
+        # create a new folder to save predicted images exists is ok
+        os.makedirs('predicted_images', exist_ok=True)
         for char_img, char in zip(char_images, characters):
-            if char in ["+", "*", '=']:
+            if char in ["+", "*", "="]:  
                 equation += char
             else:
-                predicted_label, confidence = classifier.predict(char_img)
-                if predicted_label is not None and confidence > 0.5:
+                # Convert to RGB and resize to 28x28 (as required by classifier)
+                char_img_pil = char_img.convert("RGB").resize((28, 28))
+
+                # Save for debugging
+                char_img_pil.save(os.path.join('predicted_images', f"{char}.png"))
+
+                # Predict digit using the classifier
+                with th.no_grad():
+                    predicted_label, confidence = self.mnist_classifier.predict(char_img_pil)
+                logger.info(f"Predicted Label: {predicted_label}, Confidence: {confidence}")
+
+                if confidence > 0.5 and predicted_label != 10:
                     mnist_digit_count += 1
                     equation += str(predicted_label)
                 else:
-                    equation += str('-1')  # Placeholder for non-MNIST digits
-                
-                confidence = confidence if confidence is not None else 0.0
-                confidences.append(confidence)
+                    equation += '-1'  # Placeholder for uncertain digits
+                    # save to a folder contains failed images with timestamp as its name
+                # char_img_pil.save(f'/users/zzhan513/data/zzhan513/visual_reasoning/train_repaint/guided-diffusion/char_img.png')
 
-        # Evaluate the equation
+
+                confidences.append(confidence)
+                # entropy_penalty += self.compute_entropy(predicted_probs)  # Compute entropy
+
         try:
             left_side, right_side = equation.split("=")
             is_correct = eval(left_side) == eval(right_side)
-        except Exception as e:
+        except:
             is_correct = False
-
-        return is_correct, mnist_digit_count, confidences
+        # log probs, label and entropy penalty
+        # LOGGER.info(f"Confidences: {confidences}")
+        # LOGGER.info(f"Entropy Penalty: {entropy_penalty}")
+        # LOGGER.info(f"Equation: {equation}")
+        return is_correct, mnist_digit_count, confidences, len(confidences)
     
     def decompose_image(self, image, metadata_path):
         with open(metadata_path, "r") as f:
@@ -256,7 +277,7 @@ class TrainLoop:
         assert batch.shape[0] == 1, "batch size should be 1"
 
         # FIXME: hard-coded path for metadata
-        metadata_path = '/users/zzhan513/data/zzhan513/visual_reasoning/mnist_training_imgs/addition_training_imgs/metadata'
+        metadata_path = '/users/zzhan513/data/zzhan513/visual_reasoning/train_repaint/guided-diffusion/mnist_addition_input/metadata'
         # getting ith path from metadata
         files = [f for f in os.listdir(metadata_path) if os.path.isfile(os.path.join(metadata_path, f))]
         for i in range(0, batch.shape[0], self.microbatch):

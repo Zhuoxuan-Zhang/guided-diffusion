@@ -94,8 +94,8 @@ class ImageDataset(Dataset):
         self.resolution = resolution
         self.local_images = image_paths[shard:][::num_shards]
         self.local_classes = None if classes is None else classes[shard:][::num_shards]
-        self.random_crop = random_crop
-        self.random_flip = random_flip
+        self.random_crop = False
+        self.random_flip = False
 
     def __len__(self):
         return len(self.local_images)
@@ -105,7 +105,7 @@ class ImageDataset(Dataset):
         with bf.BlobFile(path, "rb") as f:
             pil_image = Image.open(f)
             pil_image.load()
-        pil_image = pil_image.convert("L")
+        pil_image = pil_image.convert("RGB")
 
         if self.random_crop:
             arr = random_crop_arr(pil_image, self.resolution)
@@ -114,9 +114,6 @@ class ImageDataset(Dataset):
 
         # if self.random_flip and random.random() < 0.5:
         #     arr = arr[:, ::-1]
-        # For grayscale images, the array shape is (H, W). Expand dims to get (H, W, 1)
-        if arr.ndim == 2:
-            arr = np.expand_dims(arr, axis=-1)
 
         arr = arr.astype(np.float32) / 127.5 - 1
 

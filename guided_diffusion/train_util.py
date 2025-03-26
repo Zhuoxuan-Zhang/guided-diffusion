@@ -170,7 +170,7 @@ class TrainLoop:
         
         logger.log(f"Step: {self.step}, MNIST Digit Reward: {mnist_digit_reward}, Correctness Reward: {correctness_reward}, Confidence Reward: {confidence_reward}")
         # total_reward = 0.5 * mnist_digit_reward + 0.3 * correctness_reward + 0.2 * confidence_reward
-        total_reward =  0.5 * mnist_digit_reward + 0.3 * correctness_reward
+        total_reward = mnist_digit_reward
         return th.tensor([total_reward], device=dist_util.dev())
 
     def check_equation_correctness(self, char_images, characters):
@@ -279,7 +279,7 @@ class TrainLoop:
         # FIXME: hard-coded path for metadata
         metadata_path = '/users/zzhan513/data/zzhan513/visual_reasoning/train_repaint/guided-diffusion/mnist_addition_input/metadata'
         # getting ith path from metadata
-        files = [f for f in os.listdir(metadata_path) if os.path.isfile(os.path.join(metadata_path, f))]
+        metadata_files = [f for f in os.listdir(metadata_path) if os.path.isfile(os.path.join(metadata_path, f))]
         for i in range(0, batch.shape[0], self.microbatch):
             micro = batch[i : i + self.microbatch].to(dist_util.dev())
             micro_cond = {
@@ -304,7 +304,7 @@ class TrainLoop:
             # Compute rewards based on generated inpainted digits
             generated_images = self.diffusion.p_sample_loop(
                 self.model,
-                (micro.shape[0], 1, 256, 256),
+                (micro.shape[0], 3, 256, 256),
                 clip_denoised=True,
                 model_kwargs=micro_cond,
             )
@@ -316,23 +316,24 @@ class TrainLoop:
             img = img.contiguous()
             img = img.cpu().numpy()
             img = img.squeeze(0)
-            # If the image still has a singleton channel dimension, remove it.
-            if img.ndim == 3 and img.shape[-1] == 1:
-                img = img.squeeze(-1)
             img = Image.fromarray(img)
+            if self.step % 5 == 0:
+                if not os.path.exists('convert_generated_to_greyscale_image_checking'):
+                    os.makedirs('convert_generated_to_greyscale_image_checking')
+                img.save(os.path.join('convert_generated_to_greyscale_image_checking', f"sample_step_{self.step}_idx{i}_original.png"))
+            img = img.convert('L')
             # save generated images every 500 steps
-            if self.step % 50 == 0:
-                if not os.path.exists('image_checking'):
-                    os.makedirs('image_checking')
-                img.save(os.path.join('image_checking', f"sample_step_{self.step}_idx{i}.png"))
-            # json_path = os.path.join(metadata_path, files[i])
-            # rewards = self.compute_rewards(img, json_path)
-            # logger.log(f"Step: {self.step}, Reward: {rewards.item()}")
+            if self.step % 5 == 0:
+                if not os.path.exists('convert_generated_to_greyscale_image_checking'):
+                    os.makedirs('convert_generated_to_greyscale_image_checking')
+                img.save(os.path.join('convert_generated_to_greyscale_image_checking', f"sample_step_{self.step}_idx{i}_greyscale.png"))
+            json_path = os.path.join(metadata_path, metadata_files[i])
+            rewards = self.compute_rewards(img, json_path)
+            logger.log(f"Step: {self.step}, Reward: {rewards.item()}")
             
             logger.log(f'original losses: {(losses["loss"] * weights).mean()}')
-            loss = (losses["loss"] * weights).mean()
-            # loss = (losses["loss"] * weights).mean() * th.exp(-rewards.mean()) 
-            # logger.log(f'scaled losses: {loss.item()}')
+            loss = (losses["loss"] * weights).mean() * th.exp(-rewards.mean()) 
+            logger.log(f'scaled losses: {loss.item()}')
             
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}

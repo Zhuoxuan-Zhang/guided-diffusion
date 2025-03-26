@@ -20,7 +20,7 @@ def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure(dir='model_checkpoints')
+    logger.configure(dir='convert_generated_to_greyscale_mnist_model_checkpoints')
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -68,7 +68,7 @@ def create_argparser():
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=10,
-        save_interval=10000,
+        save_interval=500,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,

@@ -20,7 +20,7 @@ def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure(dir='arc_model_checkpoints')
+    logger.configure(dir='the_real_arc_horizontal_model_checkpoints')
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(

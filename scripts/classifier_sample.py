@@ -5,7 +5,7 @@ process towards more realistic images.
 
 import argparse
 import os
-
+from PIL import Image
 import numpy as np
 import torch as th
 import torch.distributed as dist
@@ -27,7 +27,7 @@ def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure()
+    logger.configure('samples')
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -87,6 +87,13 @@ def main():
         sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
+        imgs = sample.cpu().numpy()
+        print("imgs.shape", imgs.shape)
+        for i in range(imgs.shape[0]):
+            img = imgs[i]
+            img = Image.fromarray(img)
+            img = img.convert("RGB")
+            img.save(f"samples/sample_{len(all_images) * args.batch_size + i}.png")
 
         gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
@@ -113,7 +120,7 @@ def main():
 def create_argparser():
     defaults = dict(
         clip_denoised=True,
-        num_samples=10000,
+        num_samples=2,
         batch_size=16,
         use_ddim=False,
         model_path="",

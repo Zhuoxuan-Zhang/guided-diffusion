@@ -29,7 +29,7 @@ def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure()
+    logger.configure(dir='arc_classifier_checkpoints')
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_classifier_and_diffusion(
@@ -76,7 +76,7 @@ def main():
         batch_size=args.batch_size,
         image_size=args.image_size,
         class_cond=True,
-        random_crop=True,
+        random_crop=False,
     )
     if args.val_data_dir:
         val_data = load_data(

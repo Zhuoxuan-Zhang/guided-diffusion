@@ -257,36 +257,42 @@ class TrainLoop:
             else:
                 with self.ddp_model.no_sync():
                     losses = compute_losses()
-            # Compute rewards based on generated inpainted digits
-            generated_images = self.diffusion.p_sample_loop(
-                self.model,
-                (micro.shape[0], 3, 256, 256),
-                clip_denoised=True,
-                model_kwargs=micro_cond,
-            )
+
+            if isinstance(self.schedule_sampler, LossAwareSampler):
+                self.schedule_sampler.update_with_local_losses(
+                    t, losses["loss"].detach()
+                )
+            # # Compute rewards based on generated inpainted digits
+            # generated_images = self.diffusion.p_sample_loop(
+            #     self.model,
+            #     (micro.shape[0], 3, 256, 256),
+            #     clip_denoised=True,
+            #     model_kwargs=micro_cond,
+            # )
             # FIXME: assert batch size is 1
-            assert generated_images.shape[0] == 1
-            img = generated_images[0].unsqueeze(0)  # Take first sample
-            img = ((img + 1) * 127.5).clamp(0, 255).to(th.uint8) 
-            img = img.permute(0, 2, 3, 1)
-            img = img.contiguous()
-            img = img.cpu().numpy()
-            img = img.squeeze(0)
-            img = Image.fromarray(img)
+            # assert generated_images.shape[0] == 1
+            # img = generated_images[0].unsqueeze(0)  # Take first sample
+            # img = ((img + 1) * 127.5).clamp(0, 255).to(th.uint8) 
+            # img = img.permute(0, 2, 3, 1)
+            # img = img.contiguous()
+            # img = img.cpu().numpy()
+            # img = img.squeeze(0)
+            # img = Image.fromarray(img)
             # save generated images every 50 steps
-            if self.step % 50 == 0:
-                if not os.path.exists('arc_image_checking'):
-                    os.makedirs('arc_image_checking')
-                img.save(os.path.join('arc_image_checking', f"sample_step_{self.step}_idx{i}.png"))
+            # if self.step % 50 == 0:
+            #     if not os.path.exists('the_real_arc_rotational_model_checkpoints'):
+            #         os.makedirs('the_real_arc_rotational_model_checkpoints')
+            #     img.save(os.path.join('the_real_arc_rotational_model_checkpoints', f"sample_step_{self.step}_idx{i}.png"))
             # FIXME: hardcode classifier path
-            rewards = self.compute_rewards(img, classifier_path='reward_models/symmetry_classifier.pth')
-            logger.log(f"Step: {self.step}, Reward: {rewards.item()}")
+            # rewards = self.compute_rewards(img, classifier_path='reward_models/is_rotational_classifier.pth')
+            # logger.log(f"Step: {self.step}, Reward: {rewards.item()}")
 
             # Scale loss using PPO-style reward adjustment
             original_loss = (losses["loss"] * weights).mean()
-            loss = original_loss * th.exp(-rewards.mean())  # PPO reward shaping
+            # loss = original_loss * th.exp(-rewards.mean())  # PPO reward shaping
 
-            logger.log(f'Original Loss: {original_loss.item()}, PPO Scaled Loss: {loss.item()}')
+            # logger.log(f'Original Loss: {original_loss.item()}, PPO Scaled Loss: {loss.item()}')
+            loss = original_loss
             
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}

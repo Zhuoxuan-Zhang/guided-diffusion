@@ -1,5 +1,6 @@
 import math
 import random
+import json
 
 from PIL import Image
 import blobfile as bf
@@ -118,9 +119,20 @@ class ImageDataset(Dataset):
         arr = arr.astype(np.float32) / 127.5 - 1
 
         out_dict = {}
+
+        # Load the corresponding metadata JSON file.
+        # Assumes the JSON file has the same base name as the image.
+        meta_path = path.rsplit(".", 1)[0] + ".json"
+        try:
+            with bf.BlobFile(meta_path, "rb") as f:
+                metadata = json.load(f)
+        except Exception as e:
+            # If the metadata file is not found or cannot be loaded, set metadata to an empty dict.
+            raise ValueError(f"Error loading metadata from {meta_path}: {e}")
+
         if self.local_classes is not None:
             out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
-        return np.transpose(arr, [2, 0, 1]), out_dict
+        return np.transpose(arr, [2, 0, 1]), out_dict, metadata
 
 
 def center_crop_arr(pil_image, image_size):

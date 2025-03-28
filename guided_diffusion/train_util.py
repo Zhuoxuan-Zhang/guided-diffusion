@@ -156,11 +156,11 @@ class TrainLoop:
             )
             self.opt.load_state_dict(state_dict)
 
-    def compute_rewards(self, img, metadata_path=None):
-        assert metadata_path is not None, "metadata_path is required"
+    def compute_rewards(self, img, metadata=None):
+        assert metadata is not None, "metadata is required"
         #FIXME: assert batch size is 1
         assert self.batch_size == 1, "batch size should be 1"
-        char_images, characters = self.decompose_image(img, metadata_path)
+        char_images, characters = self.decompose_image(img, metadata)
         
         is_correct, mnist_digit_count, confidences, masked_number_length = self.check_equation_correctness(char_images, characters)
         # Compute reward based on MNIST digit presence and equation correctness
@@ -219,20 +219,19 @@ class TrainLoop:
         # LOGGER.info(f"Equation: {equation}")
         return is_correct, mnist_digit_count, confidences, len(confidences)
     
-    def decompose_image(self, image, metadata_path):
-        with open(metadata_path, "r") as f:
-            metadata = json.load(f)
-
+    def decompose_image(self, image, metadata):
         char_images = []
         characters = []
 
+        print("equation: ", metadata["equation"])
+
         # extract each character using the bounding boxes
         for bbox in metadata["bboxes"]:
-            character = bbox["character"]
-            left = bbox["left"]
-            top = bbox["top"]
-            right = bbox["right"]
-            bottom = bbox["bottom"]
+            character = bbox["character"][0]
+            left = bbox["left"].item()
+            top = bbox["top"].item()
+            right = bbox["right"].item()
+            bottom = bbox["bottom"].item()
             char_image = image.crop((left, top, right, bottom))
             # save char image
             # if not os.path.exists('char_images'):
@@ -250,8 +249,8 @@ class TrainLoop:
             not self.lr_anneal_steps
             or self.step + self.resume_step < self.lr_anneal_steps
         ):
-            batch, cond = next(self.data)
-            self.run_step(batch, cond)
+            batch, cond, metadata = next(self.data)
+            self.run_step(batch, cond, metadata)
             if self.step % self.log_interval == 0:
                 logger.dumpkvs()
             if self.step % self.save_interval == 0:
@@ -264,22 +263,18 @@ class TrainLoop:
         if (self.step - 1) % self.save_interval != 0:
             self.save()
 
-    def run_step(self, batch, cond):
-        self.forward_backward(batch, cond)
+    def run_step(self, batch, cond, metadata):
+        self.forward_backward(batch, cond, metadata)
         took_step = self.mp_trainer.optimize(self.opt)
         if took_step:
             self._update_ema()
         self._anneal_lr()
         self.log_step()
 
-    def forward_backward(self, batch, cond):
+    def forward_backward(self, batch, cond, metadata):
         self.mp_trainer.zero_grad()
         assert batch.shape[0] == 1, "batch size should be 1"
 
-        # FIXME: hard-coded path for metadata
-        metadata_path = '/users/zzhan513/data/zzhan513/visual_reasoning/train_repaint/guided-diffusion/mnist_addition_input/metadata'
-        # getting ith path from metadata
-        metadata_files = [f for f in os.listdir(metadata_path) if os.path.isfile(os.path.join(metadata_path, f))]
         for i in range(0, batch.shape[0], self.microbatch):
             micro = batch[i : i + self.microbatch].to(dist_util.dev())
             micro_cond = {
@@ -318,17 +313,16 @@ class TrainLoop:
             img = img.squeeze(0)
             img = Image.fromarray(img)
             if self.step % 5 == 0:
-                if not os.path.exists('convert_generated_to_greyscale_image_checking'):
-                    os.makedirs('convert_generated_to_greyscale_image_checking')
-                img.save(os.path.join('convert_generated_to_greyscale_image_checking', f"sample_step_{self.step}_idx{i}_original.png"))
+                if not os.path.exists('converted_generated_to_greyscale_with_correct_metadata_image_checking'):
+                    os.makedirs('converted_generated_to_greyscale_with_correct_metadata_image_checking')
+                img.save(os.path.join('converted_generated_to_greyscale_with_correct_metadata_image_checking', f"sample_step_{self.step}_idx{i}_original.png"))
             img = img.convert('L')
             # save generated images every 500 steps
             if self.step % 5 == 0:
-                if not os.path.exists('convert_generated_to_greyscale_image_checking'):
-                    os.makedirs('convert_generated_to_greyscale_image_checking')
-                img.save(os.path.join('convert_generated_to_greyscale_image_checking', f"sample_step_{self.step}_idx{i}_greyscale.png"))
-            json_path = os.path.join(metadata_path, metadata_files[i])
-            rewards = self.compute_rewards(img, json_path)
+                if not os.path.exists('converted_generated_to_greyscale_with_correct_metadata_image_checking'):
+                    os.makedirs('converted_generated_to_greyscale_with_correct_metadata_image_checking')
+                img.save(os.path.join('converted_generated_to_greyscale_with_correct_metadata_image_checking', f"sample_step_{self.step}_idx{i}_greyscale.png"))
+            rewards = self.compute_rewards(img, metadata)
             logger.log(f"Step: {self.step}, Reward: {rewards.item()}")
             
             logger.log(f'original losses: {(losses["loss"] * weights).mean()}')

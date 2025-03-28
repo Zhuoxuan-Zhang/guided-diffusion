@@ -20,7 +20,7 @@ def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure(dir='convert_generated_to_greyscale_mnist_model_checkpoints')
+    logger.configure(dir='converted_generated_to_greyscale_with_correct_metadata_mnist_model_checkpoints')
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(

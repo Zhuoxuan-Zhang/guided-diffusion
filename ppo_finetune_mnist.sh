@@ -1,7 +1,7 @@
 #!/bin/bash
 # Set dataset path
-DATASET_PATH="/users/zzhan513/data/zzhan513/visual_reasoning/mnist_training_imgs/addition_training_imgs/gt"
-PRETRAINED_CHECKPOINT="no_flip_addition_model_checkpoints/model090000.pt"
+DATASET_PATH="/users/zzhan513/data/zzhan513/visual_reasoning/train_repaint/guided-diffusion/mnist_addition_input/addition/gt"
+PRETRAINED_CHECKPOINT="/users/zzhan513/data/zzhan513/visual_reasoning/train_repaint/guided-diffusion/convert_generated_to_greyscale_mnist_model_checkpoints/model060500.pt"
 
 # Reduce memory usage
 MODEL_FLAGS="--image_size 256 --num_channels 256 --num_res_blocks 2 --num_head_channels 64 --learn_sigma True --use_scale_shift_norm True --attention_resolutions 32,16,8 --class_cond True --resblock_updown True --use_fp16 True"

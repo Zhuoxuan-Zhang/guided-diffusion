@@ -207,24 +207,24 @@ class TrainLoop:
                 self.schedule_sampler.update_with_local_losses(
                     t, losses["loss"].detach()
                 )
-            # save an example image every 1000 steps
-            if self.step % 1000 == 0:
-                generated_images = self.diffusion.p_sample_loop(
-                    self.model,
-                    (micro.shape[0], 3, 256, 256),
-                    clip_denoised=True,
-                    model_kwargs=micro_cond,
-                    )
-                img = generated_images[0].unsqueeze(0)  # Take first sample
-                img = ((img + 1) * 127.5).clamp(0, 255).to(th.uint8) 
-                img = img.permute(0, 2, 3, 1)
-                img = img.contiguous()
-                img = img.cpu().numpy()
-                img = img.squeeze(0)
-                img = Image.fromarray(img)
-                if not os.path.exists('image_checking'):
-                    os.makedirs('image_checking')
-                img.save(os.path.join('image_checking', f"sample_step_{self.step}_idx{i}.png"))
+            # # save an example image every 1000 steps
+            # if self.step % 1000 == 0:
+            #     generated_images = self.diffusion.p_sample_loop(
+            #         self.model,
+            #         (micro.shape[0], 3, 256, 256),
+            #         clip_denoised=True,
+            #         model_kwargs=micro_cond,
+            #         )
+            #     img = generated_images[0].unsqueeze(0)  # Take first sample
+            #     img = ((img + 1) * 127.5).clamp(0, 255).to(th.uint8) 
+            #     img = img.permute(0, 2, 3, 1)
+            #     img = img.contiguous()
+            #     img = img.cpu().numpy()
+            #     img = img.squeeze(0)
+            #     img = Image.fromarray(img)
+            #     if not os.path.exists('image_checking'):
+            #         os.makedirs('image_checking')
+            #     img.save(os.path.join('image_checking', f"sample_step_{self.step}_idx{i}.png"))
 
             loss = (losses["loss"] * weights).mean()
             log_loss_dict(

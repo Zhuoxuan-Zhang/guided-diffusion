@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set dataset path
-DATASET_PATH="/users/zzhan513/data/zzhan513/visual_reasoning/train_repaint/horizontal_train_set"
+DATASET_PATH="/users/zzhan513/data/zzhan513/visual_reasoning/symmetric_training_imgs/horizontal_arc_for_training/train"
 PRETRAINED_CHECKPOINT="models/256x256_diffusion.pt"
 
 # Reduce memory usage
